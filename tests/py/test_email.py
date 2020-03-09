@@ -58,6 +58,10 @@ class TestEmail(EmailHarness):
     def test_participant_can_add_email(self):
         response = self.hit_email_spt('add-email', 'alice@example.com')
         assert response.text == '{}'
+        with patch.object(self.website, 'app_conf') as app_conf:
+            app_conf.check_email_domains = True
+            response = self.hit_email_spt('add-email', 'support@liberapay.com')
+            assert response.text == '{}'
 
     def test_participant_can_add_email_with_unicode_domain_name(self):
         punycode_email = 'alice@' + 'accentué.com'.encode('idna').decode()
@@ -81,8 +85,9 @@ class TestEmail(EmailHarness):
 
     def test_participant_cant_add_email_with_bad_domain(self):
         bad = (
-            'alice@phantom.liberapay.com',  # no MX record
-            'alice@nonexistent.liberapay.com',  # NXDOMAIN
+            'alice@phantom.liberapay.com',  # no MX, A or AAAA record
+            'alice@nonexistent.oy.lc',  # NXDOMAIN
+            'alice@nullmx.liberapay.com',  # null MX record, per RFC 7505
         )
         with patch.object(self.website, 'app_conf') as app_conf:
             app_conf.check_email_domains = True

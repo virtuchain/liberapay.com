@@ -1,7 +1,9 @@
 from datetime import timedelta
 from enum import Enum, auto
+from ipaddress import ip_address
 import json
 import logging
+from random import random
 from time import sleep
 
 from aspen.simplates.pagination import parse_specline, split_and_escape
@@ -95,16 +97,83 @@ def normalize_email_address(email):
         # The length limit is from https://tools.ietf.org/html/rfc3696#section-3
         raise BadEmailAddress(email)
 
-    # Check that the domain has at least one MX record
+    # Check that we can resolve the email domain to an IP address
     if website.app_conf.check_email_domains:
         try:
-            DNS.query(domain, 'MX')
-        except DNSException:
-            raise BadEmailDomain(domain)
+            ip_addresses = get_email_server_addresses(domain)
+        except BadEmailDomain:
+            raise
+        except DNSException as e:
+            raise BadEmailDomain(domain, e)
         except Exception as e:
             website.tell_sentry(e, {})
+        else:
+            if not ip_addresses:
+                raise BadEmailDomain(domain, (
+                    "didn't find any public IP address to deliver emails to"
+                ))
 
     return email
+
+
+def get_email_server_addresses(domain):
+    """Resolve an email domain to IP addresses.
+
+    Returns a list of `IPv4Address` or `IPv6Address` objects.
+
+    Raises:
+        BadEmailDomain: if the domain doesn't accept email (RFC 7505)
+        DNSException: if a DNS query fails
+
+    Spec: https://tools.ietf.org/html/rfc5321#section-5.1
+
+    """
+    rrset = DNS.query(domain, 'MX', raise_on_no_answer=False).rrset
+    if rrset:
+        if len(rrset) == 1 and str(rrset[0].exchange) == '.':
+            # This domain doesn't accept email. https://tools.ietf.org/html/rfc7505
+            raise BadEmailDomain(
+                domain, f"the domain {domain} has a 'null MX' record (RFC 7505)"
+            )
+        # Sort the returned MX records
+        records = sorted(rrset, key=lambda rec: (rec.preference, random()))
+        mx_domains = [str(rec.exchange).rstrip('.') for rec in records]
+    else:
+        mx_domains = [domain]
+    # Return the list of IP addresses, in order, without duplicates
+    # We limit ourselves to looking up a maximum of 5 domains
+    addresses = []
+    seen = set()
+    for mx_domain in mx_domains[:5]:
+        for addr in get_public_ip_addresses(mx_domain):
+            if addr not in seen:
+                addresses.append(addr)
+                seen.add(addr)
+    return addresses
+
+
+def get_public_ip_addresses(domain):
+    """Resolve a domain name to public IP addresses.
+
+    Returns a list of `IPv4Address` or `IPv6Address` objects.
+
+    Raises `DNSException` if the `A` or `AAAA` query fails.
+
+    """
+    records = (
+        list(DNS.query(domain, 'A', raise_on_no_answer=False).rrset or ()) +
+        list(DNS.query(domain, 'AAAA', raise_on_no_answer=False).rrset or ())
+    )
+    # Return the list of valid global IP addresses found
+    addresses = []
+    for rec in records:
+        try:
+            addr = ip_address(rec.address)
+        except ValueError:
+            continue
+        if addr.is_global:
+            addresses.append(addr)
+    return addresses
 
 
 def check_email_blacklist(address, check_domain=True):
